@@ -20,9 +20,6 @@
 #define TB_TABS_THRESHOLD 120
 // Сколько ждать, пока хост подтвердит переключение раскладки, прежде чем печатать, мс.
 #define HOST_EN_TIMEOUT_MS 300
-// Пауза между символом из комбо и возвратом раскладки, чтобы ОС успела
-// обработать символ до переключения, мс.
-#define HOST_RESTORE_DELAY_MS 10
 // Сколько держать комбинацию для входа в бутлоадер, мс.
 #define BOOT_HOLD_MS 1000
 // RGB: яркость 0…255 (на всех слоях) и скорость радуги на базовом слое.
@@ -39,7 +36,7 @@ enum charybdis_keymap_layers {
 };
 
 enum charybdis_keymap_keycodes {
-    // Пока зажата: трекбол влево — Ctrl+PgDn, вправо — Ctrl+PgUp.
+    // Пока зажата: трекбол влево — Ctrl+PgUp, вправо — Ctrl+PgDn.
     TB_TABS = SAFE_RANGE,
     // Win зажимается, тапается Пробел, затем Win отпускается.
     WIN_SPC,
@@ -415,13 +412,16 @@ void raw_hid_receive(uint8_t *data, uint8_t length) {
     }
 }
 
-// Символы на слоях Numbers и Utility рассчитаны на английскую раскладку.
-// Пока включён любой из них, просим хост переключиться на EN, а при выходе —
-// вернуть прежнюю раскладку. Без связи с хостом считаем, что стоит EN.
+// Символы на слоях Numbers и Utility и скобки из комбо рассчитаны на
+// английскую раскладку. Пока включён любой из этих слоёв или зажато такое
+// комбо, просим хост переключиться на EN, а когда не осталось ни того, ни
+// другого — вернуть прежнюю раскладку. Без связи с хостом считаем, что стоит EN.
 // Каждое нажатие придерживается, пока хост не подтвердит переключение
 // (обычно ~1 мс, бывает до ~20 мс), но не дольше HOST_EN_TIMEOUT_MS.
 // Подтверждения возврата тоже ждём: пока оно не пришло, host_layout ещё
 // показывает EN, и следующее комбо или слой не запросили бы EN заново.
+static bool layer_wants_en = false; // включён Numbers или Utility
+static bool combo_wants_en = false; // зажато комбо со скобкой
 
 static void host_request_en(void) {
     host_send(HID_REQUEST_EN);
@@ -437,17 +437,21 @@ static void host_restore(void) {
     host_timer      = timer_read();
 }
 
-layer_state_t layer_state_set_user(layer_state_t state) {
-    if (!is_keyboard_master()) {
-        return state;
-    }
-    bool want_en = layer_state_cmp(state, LAYER_NUMBERS) || layer_state_cmp(state, LAYER_UTILITY);
+static void host_update_en(void) {
+    bool want_en = layer_wants_en || combo_wants_en;
     if (want_en && !en_requested && (host_layout == HOST_LAYOUT_RU || host_layout == HOST_LAYOUT_UNKNOWN)) {
         host_request_en();
         en_requested = true;
     } else if (!want_en && en_requested) {
         host_restore();
         en_requested = false;
+    }
+}
+
+layer_state_t layer_state_set_user(layer_state_t state) {
+    if (is_keyboard_master()) {
+        layer_wants_en = layer_state_cmp(state, LAYER_NUMBERS) || layer_state_cmp(state, LAYER_UTILITY);
+        host_update_en();
     }
     return state;
 }
@@ -465,19 +469,14 @@ static void wait_for_host(void) {
     restore_pending = false;
 }
 
-// Скобки из комбо тоже рассчитаны на EN. Если EN ещё не стоит и не запрошен
-// слоем, включаем его на время одного символа и сразу возвращаем прежнюю.
-static void tap_code16_en(uint16_t keycode) {
-    wait_for_host();
-    bool temp_en = !en_requested && (host_layout == HOST_LAYOUT_RU || host_layout == HOST_LAYOUT_UNKNOWN);
-    if (temp_en) {
-        host_request_en();
+// Комбо со скобкой держит EN, пока зажато, — так же, как слой. Символ
+// печатается при нажатии, раскладка возвращается при отпускании.
+static void combo_tap_en(uint16_t keycode, keyrecord_t *record) {
+    combo_wants_en = record->event.pressed;
+    host_update_en();
+    if (record->event.pressed) {
         wait_for_host();
-    }
-    tap_code16(keycode);
-    if (temp_en) {
-        wait_ms(HOST_RESTORE_DELAY_MS);
-        host_restore();
+        tap_code16(keycode);
     }
 }
 
@@ -560,20 +559,17 @@ bool process_record_user(uint16_t keycode, keyrecord_t *record) {
             }
             break;
         case INV_LCB:
-        case INV_RCB:
-            if (record->event.pressed) {
-                uint16_t bracket = keycode == INV_LCB ? KC_LBRC : KC_RBRC;
-                uint8_t  shift   = get_mods() & MOD_MASK_SHIFT;
-                del_mods(shift);
-                tap_code16_en(shift ? bracket : S(bracket));
-                add_mods(shift);
-            }
+        case INV_RCB: {
+            uint16_t bracket = keycode == INV_LCB ? KC_LBRC : KC_RBRC;
+            uint8_t  shift   = get_mods() & MOD_MASK_SHIFT;
+            del_mods(shift);
+            combo_tap_en(shift ? bracket : S(bracket), record);
+            add_mods(shift);
             return false;
+        }
         case KC_LT: // только из комбо
         case KC_GT:
-            if (record->event.pressed) {
-                tap_code16_en(keycode);
-            }
+            combo_tap_en(keycode, record);
             return false;
     }
     return true;
