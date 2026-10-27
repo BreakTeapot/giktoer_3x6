@@ -417,7 +417,8 @@ void raw_hid_receive(uint8_t *data, uint8_t length) {
 // комбо, просим хост переключиться на EN, а когда не осталось ни того, ни
 // другого — вернуть прежнюю раскладку. Без связи с хостом считаем, что стоит EN.
 // Каждое нажатие придерживается, пока хост не подтвердит переключение
-// (обычно ~1 мс, бывает до ~20 мс), но не дольше HOST_EN_TIMEOUT_MS.
+// (обычно ~1 мс, бывает до ~20 мс), но не дольше HOST_EN_TIMEOUT_MS; если
+// время вышло, считаем, что хоста нет, пока он снова не пришлёт HOST_READY.
 // Подтверждения возврата тоже ждём: пока оно не пришло, host_layout ещё
 // показывает EN, и следующее комбо или слой не запросили бы EN заново.
 static bool layer_wants_en = false; // включён Numbers или Utility
@@ -464,9 +465,16 @@ static void wait_for_host(void) {
     while ((en_pending || restore_pending) && timer_elapsed(host_timer) < HOST_EN_TIMEOUT_MS) {
         raw_hid_task();
     }
-    // По таймауту печатаем как есть и больше не ждём.
-    en_pending      = false;
-    restore_pending = false;
+    if (en_pending || restore_pending) {
+        // Хост не ответил — считаем, что его нет: печатаем как есть, как при
+        // EN, и больше ничего не запрашиваем. Если программа на самом деле
+        // жива, она ответит на HOST_READY и связь восстановится.
+        host_layout     = HOST_LAYOUT_NONE;
+        en_requested    = false;
+        en_pending      = false;
+        restore_pending = false;
+        host_send(HID_HOST_READY);
+    }
 }
 
 // Комбо со скобкой держит EN, пока зажато, — так же, как слой. Символ
