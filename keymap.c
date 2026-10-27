@@ -7,25 +7,30 @@
  */
 #include QMK_KEYBOARD_H
 #include <stdlib.h>
+#include <string.h>
 #include "bk_pointing_modes.h"
 #include "raw_hid.h"
 #include "transactions.h"
 
-// ── Настройки ─────────────────────────────────────────────────────────────────
+// ── Настройки ────────────────────────────────────────────────────────────────
 // DPI трекбола по режимам, шаг 100. Обычный: 100…3100, остальные: 100…2100.
 #define TB_NORMAL_DPI     800
 #define TB_SNIPING_DPI    500
 #define TB_DRAGSCROLL_DPI 500
 // TB_TABS: сколько прокрутить трекбол по X, чтобы переключить одну вкладку.
 #define TB_TABS_THRESHOLD 120
-// Сколько ждать, пока хост подтвердит переключение раскладки, прежде чем печатать, мс.
+// Сколько ждать ответа хоста — на переключение раскладки (нажатие при этом
+// придерживается) и на пинг, мс.
 #define HOST_EN_TIMEOUT_MS 300
+// Как часто пинговать хост, пока связи нет, мс.
+#define HOST_PING_INTERVAL_MS 2000
 // Сколько держать комбинацию для входа в бутлоадер, мс.
 #define BOOT_HOLD_MS 1000
 // RGB: яркость 0…255 (на всех слоях) и скорость радуги на базовом слое.
 #define RGB_BRIGHTNESS 125
 #define RGB_SPEED      50
 
+// ── Слои и свои кейкоды ──────────────────────────────────────────────────────
 enum charybdis_keymap_layers {
     LAYER_BASE = 0,
     LAYER_NUMBERS, // 1
@@ -38,19 +43,20 @@ enum charybdis_keymap_layers {
 enum charybdis_keymap_keycodes {
     // Пока зажата: трекбол влево — Ctrl+PgUp, вправо — Ctrl+PgDn.
     TB_TABS = SAFE_RANGE,
-    // Win зажимается, тапается Пробел, затем Win отпускается.
+    // Win зажимается, тапается Пробел, затем Win отпускается. На слоях
+    // Numbers и Utility отключён: там нужен EN, и язык менять нельзя.
     WIN_SPC,
     // Фигурные скобки, Shift инвертирован: без Shift — {, с Shift — [.
     INV_LCB,
     INV_RCB,
 };
 
-// ── Большие пальцы ────────────────────────────────────────────────────────────
+// ── Большие пальцы ───────────────────────────────────────────────────────────
 #define RAI_SPC LT(LAYER_UTILITY, KC_SPC)
 #define NUMBERS MO(LAYER_NUMBERS)
 #define CTL_ESC LCTL_T(KC_ESC)
 
-// ── Home row mods, база: Shift / Alt / GUI / Ctrl ─────────────────────────────
+// ── Home row mods, база: Shift / Alt / GUI / Ctrl ────────────────────────────
 #define HM_A    LSFT_T(KC_A)
 #define HM_S    LALT_T(KC_S)
 #define HM_D    LGUI_T(KC_D)
@@ -74,6 +80,7 @@ enum charybdis_keymap_keycodes {
 #define HM_6    LALT_T(KC_6)
 #define HM_0    LSFT_T(KC_0)
 
+// ── Кеймап ───────────────────────────────────────────────────────────────────
 // clang-format off
 const uint16_t PROGMEM keymaps[][MATRIX_ROWS][MATRIX_COLS] = {
   [LAYER_BASE] = LAYOUT(
@@ -102,7 +109,7 @@ const uint16_t PROGMEM keymaps[][MATRIX_ROWS][MATRIX_COLS] = {
        XXXXXXX, KC_PIPE,  KC_DLR, KC_QUOT, KC_UNDS, KC_SCLN,    KC_SLSH,    KC_1,    KC_2,    KC_3, KC_ASTR, XXXXXXX,
   // ╰──────────────────────────────────────────────────────┤ ├──────────────────────────────────────────────────────╯
                              _______, MO(LAYER_FN), _______,    XXXXXXX, _______,
-                                           _______, _______,    _______
+                                           XXXXXXX, _______,    _______
   //                            ╰───────────────────────────╯ ╰──────────────────╯
   ),
 
@@ -117,7 +124,7 @@ const uint16_t PROGMEM keymaps[][MATRIX_ROWS][MATRIX_COLS] = {
        KC_MPRV, KC_HOME, KC_PGUP, KC_PGDN,  KC_END, KC_SCLN,    KC_SLSH,  KC_GRV, KC_QUOT, KC_HASH, XXXXXXX, XXXXXXX,
   // ╰──────────────────────────────────────────────────────┤ ├──────────────────────────────────────────────────────╯
                                   _______, XXXXXXX, _______,  MO(LAYER_FN), _______,
-                                           _______, _______,    _______
+                                           XXXXXXX, _______,    _______
   //                            ╰───────────────────────────╯ ╰──────────────────╯
   ),
 
@@ -166,96 +173,9 @@ const uint16_t PROGMEM keymaps[][MATRIX_ROWS][MATRIX_COLS] = {
   //                            ╰───────────────────────────╯ ╰──────────────────╯
   ),
 };
-
-// Подсветка слоёв. На базовом слое — радуга слева направо. На остальных слоях
-// базовый эффект не просвечивает: клавиша горит цветом из таблицы, C_OFF —
-// выключена, C_FX — показывает радугу базового слоя. Слои, которых нет в
-// таблице (FN), полностью тёмные.
-enum layer_colors {
-    C_OFF = 0,
-    C_FX,
-    C_PURP,
-    C_GREEN,
-    C_CYAN,
-};
-
-static const rgb_t layer_palette[] = {
-    [C_OFF]   = {.r = 0,   .g = 0,   .b = 0},
-    [C_PURP]  = {.r = 221, .g = 0,   .b = 255},
-    [C_GREEN] = {.r = 33,  .g = 255, .b = 0},
-    [C_CYAN]  = {.r = 0,   .g = 255, .b = 235},
-};
-
-static const uint8_t PROGMEM layer_colors[][MATRIX_ROWS][MATRIX_COLS] = {
-  [LAYER_NUMBERS] = LAYOUT(
-         C_OFF,  C_PURP,  C_PURP,   C_OFF,   C_OFF,  C_PURP,     C_PURP,   C_OFF,   C_OFF,  C_PURP,  C_PURP,   C_OFF,
-         C_OFF,  C_PURP,   C_OFF,   C_OFF,   C_OFF,  C_PURP,     C_PURP,   C_OFF,   C_OFF,   C_OFF,  C_PURP,   C_OFF,
-         C_OFF,  C_PURP,   C_OFF,   C_OFF,   C_OFF,  C_PURP,     C_PURP,   C_OFF,   C_OFF,   C_OFF,  C_PURP,   C_OFF,
-        C_PURP,  C_PURP,   C_OFF,   C_OFF,   C_OFF,  C_PURP,     C_PURP,   C_OFF,   C_OFF,   C_OFF,  C_PURP,  C_PURP,
-                                  C_PURP,  C_PURP,  C_PURP,     C_PURP,  C_PURP,
-                                           C_PURP,  C_PURP,     C_PURP
-  ),
-  [LAYER_UTILITY] = LAYOUT(
-         C_OFF, C_GREEN, C_GREEN,   C_OFF,   C_OFF, C_GREEN,    C_GREEN,   C_OFF,   C_OFF, C_GREEN, C_GREEN,   C_OFF,
-         C_OFF, C_GREEN,   C_OFF,   C_OFF,   C_OFF, C_GREEN,    C_GREEN,   C_OFF,   C_OFF,   C_OFF, C_GREEN,   C_OFF,
-         C_OFF, C_GREEN,   C_OFF,   C_OFF,   C_OFF, C_GREEN,    C_GREEN,   C_OFF,   C_OFF,   C_OFF, C_GREEN,   C_OFF,
-       C_GREEN, C_GREEN,   C_OFF,   C_OFF,   C_OFF, C_GREEN,    C_GREEN,   C_OFF,   C_OFF,   C_OFF, C_GREEN, C_GREEN,
-                                 C_GREEN, C_GREEN, C_GREEN,    C_GREEN, C_GREEN,
-                                          C_GREEN, C_GREEN,    C_GREEN
-  ),
-  [LAYER_POINTER] = LAYOUT(
-         C_OFF,  C_CYAN,  C_CYAN,   C_OFF,   C_OFF,  C_CYAN,     C_CYAN,   C_OFF,   C_OFF,  C_CYAN,  C_CYAN,   C_OFF,
-         C_OFF,  C_CYAN,   C_OFF,   C_OFF,   C_OFF,  C_CYAN,     C_CYAN,   C_OFF,   C_OFF,   C_OFF,  C_CYAN,   C_OFF,
-         C_OFF,  C_CYAN,   C_OFF,   C_OFF,   C_OFF,  C_CYAN,     C_CYAN,   C_OFF,   C_OFF,   C_OFF,  C_CYAN,   C_OFF,
-        C_CYAN,  C_CYAN,   C_OFF,   C_OFF,   C_OFF,  C_CYAN,     C_CYAN,   C_OFF,   C_OFF,   C_OFF,  C_CYAN,  C_CYAN,
-                                  C_CYAN,  C_CYAN,  C_CYAN,     C_CYAN,  C_CYAN,
-                                           C_CYAN,  C_CYAN,     C_CYAN
-  ),
-  [LAYER_GAME] = LAYOUT(
-         C_OFF,   C_OFF,   C_OFF,   C_OFF,   C_OFF,   C_OFF,      C_OFF,   C_OFF,   C_OFF,   C_OFF,   C_OFF,   C_OFF,
-         C_OFF,   C_OFF,   C_OFF,    C_FX,   C_OFF,   C_OFF,      C_OFF,   C_OFF,   C_OFF,   C_OFF,   C_OFF, C_GREEN,
-         C_OFF,   C_OFF,    C_FX,    C_FX,    C_FX,   C_OFF,      C_OFF,   C_OFF,   C_OFF,   C_OFF,   C_OFF,   C_OFF,
-         C_OFF,   C_OFF,   C_OFF,   C_OFF,   C_OFF,   C_OFF,      C_OFF,   C_OFF,   C_OFF,   C_OFF,   C_OFF,   C_OFF,
-                                    C_FX,    C_FX,    C_FX,       C_FX,    C_FX,
-                                             C_FX,    C_FX,       C_FX
-  ),
-};
 // clang-format on
 
-// Комбо: одновременное нажатие двух соседних клавиш даёт скобку.
-// Слева открывающие, справа зеркально — закрывающие:
-//   E+R — {  (с Shift — [)      U+I — }  (с Shift — ])
-//   D+F — (                     J+K — )
-//   C+V — <                     M+, — >
-//   Клик + Backspace (большой палец) — Win+D, свернуть все окна
-// Клавиши всегда берутся с базового слоя (COMBO_ONLY_FROM_LAYER в config.h),
-// а срабатывают комбо только на слоях Base, Numbers и Utility.
-const uint16_t PROGMEM combo_lcb[]  = {KC_E, KC_R, COMBO_END};
-const uint16_t PROGMEM combo_rcb[]  = {KC_U, KC_I, COMBO_END};
-const uint16_t PROGMEM combo_lprn[] = {HM_D, PT_F, COMBO_END};
-const uint16_t PROGMEM combo_rprn[] = {HM_J, HM_K, COMBO_END};
-const uint16_t PROGMEM combo_lt[]   = {KC_C, KC_V, COMBO_END};
-const uint16_t PROGMEM combo_gt[]   = {KC_M, KC_COMM, COMBO_END};
-const uint16_t PROGMEM combo_desk[] = {MS_BTN1, KC_BSPC, COMBO_END};
-
-combo_t key_combos[] = {
-    COMBO(combo_lcb, INV_LCB),
-    COMBO(combo_rcb, INV_RCB),
-    COMBO(combo_lprn, KC_LPRN),
-    COMBO(combo_rprn, KC_RPRN),
-    COMBO(combo_lt, KC_LT),
-    COMBO(combo_gt, KC_GT),
-    COMBO(combo_desk, G(KC_D)),
-};
-
-// Shift + Backspace — Delete (Shift при этом не отправляется).
-const key_override_t shift_bspc_del = ko_make_basic(MOD_MASK_SHIFT, KC_BSPC, KC_DEL);
-
-const key_override_t *key_overrides[] = {
-    &shift_bspc_del,
-};
-
-// ── Flow Tap и Chordal Hold ──────────────────────────────────────────────────
+// ── Tap-hold: Flow Tap и Chordal Hold ────────────────────────────────────────
 // Thumb-ряд — пятый ряд каждой половины (4 и 9). Проверяем по ряду, а не по
 // стороне, чтобы работало при кабеле в любой половине.
 static bool is_thumb_key(keypos_t key) {
@@ -290,6 +210,33 @@ bool get_chordal_hold(uint16_t tap_hold_keycode, keyrecord_t *tap_hold_record, u
     return get_chordal_hold_default(tap_hold_record, other_record);
 }
 
+// ── Комбо ────────────────────────────────────────────────────────────────────
+// Одновременное нажатие двух соседних клавиш даёт скобку.
+// Слева открывающие, справа зеркально — закрывающие:
+//   E+R — {  (с Shift — [)      U+I — }  (с Shift — ])
+//   D+F — (                     J+K — )
+//   C+V — <                     M+, — >
+//   Клик + Backspace (большой палец) — Win+D, свернуть все окна
+// Клавиши всегда берутся с базового слоя (COMBO_ONLY_FROM_LAYER в config.h),
+// а срабатывают комбо только на слоях Base, Numbers и Utility.
+const uint16_t PROGMEM combo_lcb[]  = {KC_E, KC_R, COMBO_END};
+const uint16_t PROGMEM combo_rcb[]  = {KC_U, KC_I, COMBO_END};
+const uint16_t PROGMEM combo_lprn[] = {HM_D, PT_F, COMBO_END};
+const uint16_t PROGMEM combo_rprn[] = {HM_J, HM_K, COMBO_END};
+const uint16_t PROGMEM combo_lt[]   = {KC_C, KC_V, COMBO_END};
+const uint16_t PROGMEM combo_gt[]   = {KC_M, KC_COMM, COMBO_END};
+const uint16_t PROGMEM combo_desk[] = {MS_BTN1, KC_BSPC, COMBO_END};
+
+combo_t key_combos[] = {
+    COMBO(combo_lcb, INV_LCB),
+    COMBO(combo_rcb, INV_RCB),
+    COMBO(combo_lprn, KC_LPRN),
+    COMBO(combo_rprn, KC_RPRN),
+    COMBO(combo_lt, KC_LT),
+    COMBO(combo_gt, KC_GT),
+    COMBO(combo_desk, G(KC_D)),
+};
+
 bool combo_should_trigger(uint16_t combo_index, combo_t *combo, uint16_t keycode, keyrecord_t *record) {
     switch (get_highest_layer(layer_state | default_layer_state)) {
         case LAYER_BASE:
@@ -301,17 +248,260 @@ bool combo_should_trigger(uint16_t combo_index, combo_t *combo, uint16_t keycode
     }
 }
 
-// Внимание: модуль bk_pointing_device сам вызывает process_record_user, и если
-// функция вернула true — ядро QMK вызовет её ещё раз для того же события.
-// Поэтому побочные эффекты делаем только в ветках, которые возвращают false.
-static bool tb_tabs_held = false;
+// ── Key overrides ────────────────────────────────────────────────────────────
+// Shift + Backspace — Delete (Shift при этом не отправляется).
+const key_override_t shift_bspc_del = ko_make_basic(MOD_MASK_SHIFT, KC_BSPC, KC_DEL);
 
-// Бутлоадер: зажать на BOOT_HOLD_MS клавишу большого пальца и две верхние
-// клавиши у центра той же половины. Слева — пробел (он же Utility), справа —
-// Numbers. Проверяются положения в матрице, а не слои: в прошивке Charybdis
-// задан MASTER_RIGHT, поэтому половина с USB всегда считает себя правой
-// (ряды 5–9). При кабеле в левой половине её верхние клавиши приходят на
-// [5,4]/[5,5], а пробел — на пустое место [9,4], и слой Utility не включается.
+const key_override_t *key_overrides[] = {
+    &shift_bspc_del,
+};
+
+// ── Связь с программой land_detect на ПК (Raw HID) ───────────────────────────
+// Пакет 32 байта, код команды в data[0]. Хост присылает раскладку, только когда
+// она изменилась: на запрос, который ничего не поменял или не удался (например,
+// в окне, запущенном от администратора), он молчит. Поэтому молчание на запрос —
+// не обрыв связи. Жив ли хост, проверяем пингом: на HOST_READY он отвечает
+// всегда — HOST_READY и раскладкой. Сам хост присылает то же при каждом
+// подключении к клавиатуре.
+// Пока связь есть, верхняя правая клавиша левой половины горит фиолетовым
+// при английской раскладке, верхняя левая клавиша правой половины — при русской.
+enum hid_cmd {
+    HID_LAYOUT_EN       = 0x01, // host → kb
+    HID_LAYOUT_RU       = 0x02, // host → kb
+    HID_REQUEST_EN      = 0x10, // kb → host
+    HID_REQUEST_RUSSIAN = 0x11, // kb → host
+    HID_RESTORE_LAYOUT  = 0x19, // kb → host
+    HID_HOST_READY      = 0x20, // оба направления
+};
+
+enum host_layout {
+    HOST_LAYOUT_UNKNOWN = 0, // хост ещё не сообщил или связи нет
+    HOST_LAYOUT_EN,
+    HOST_LAYOUT_RU,
+};
+
+// На ведущей половине — из Raw HID, на ведомой — из синхронизации.
+typedef struct {
+    bool    connected;
+    uint8_t layout; // enum host_layout
+} host_state_t;
+
+static host_state_t host = {0};
+
+// Символы на слоях Numbers и Utility и скобки из комбо рассчитаны на
+// английскую раскладку. Пока включён любой из этих слоёв или зажато такое
+// комбо, просим хост переключиться на EN, а когда не осталось ни того, ни
+// другого — вернуть прежнюю раскладку. Если связи нет или раскладка
+// неизвестна, считаем, что стоит EN, и ничего не просим.
+// Запросы идут строго по одному: следующий отправляем, только когда хост
+// ответил на предыдущий или время ожидания вышло. Нажатие клавиши
+// придерживается, пока ответа нет (обычно ~1 мс, бывает до ~20 мс), но не
+// дольше HOST_EN_TIMEOUT_MS. Если хост промолчал, считаем, что раскладка не
+// изменилась, и за это удержание слоя или комбо больше EN не просим.
+enum host_wait {
+    HOST_WAIT_NONE = 0,
+    HOST_WAIT_EN,      // попросили EN — ждём LAYOUT_EN
+    HOST_WAIT_RESTORE, // попросили вернуть раскладку — ждём любую
+};
+
+static bool     layer_wants_en = false; // включён Numbers или Utility
+static bool     combo_wants_en = false; // зажато комбо со скобкой
+static bool     en_tried       = false; // за это удержание EN уже просили
+static bool     en_owed        = false; // хост переключился на EN по нашей просьбе — надо вернуть
+static uint8_t  host_wait      = HOST_WAIT_NONE;
+static uint16_t host_wait_timer;
+static bool     ping_pending   = false; // отправили HOST_READY, ждём ответ
+static uint16_t ping_timer;
+
+static void host_send(uint8_t cmd) {
+    uint8_t data[32] = {cmd}; // размер пакета по протоколу
+    raw_hid_send(data, sizeof(data));
+}
+
+static void host_ping(void) {
+    host_send(HID_HOST_READY);
+    ping_pending = true;
+    ping_timer   = timer_read();
+}
+
+static void host_start_wait(uint8_t cmd, uint8_t wait) {
+    host_send(cmd);
+    host_wait       = wait;
+    host_wait_timer = timer_read();
+}
+
+static void host_update_en(void) {
+    if (host_wait != HOST_WAIT_NONE) {
+        return; // вызовемся снова, когда ожидание закончится
+    }
+    bool want_en = layer_wants_en || combo_wants_en;
+    if (!want_en) {
+        en_tried = false;
+        if (en_owed) {
+            en_owed = false;
+            host_start_wait(HID_RESTORE_LAYOUT, HOST_WAIT_RESTORE);
+        }
+    } else if (!en_tried && host.connected && !ping_pending && host.layout == HOST_LAYOUT_RU) {
+        en_tried = true;
+        host_start_wait(HID_REQUEST_EN, HOST_WAIT_EN);
+    }
+}
+
+// Хост (пере)подключился: всё, что мы от него ждали или что он нам должен,
+// относится к прошлому сеансу.
+static void host_session_start(void) {
+    host.connected = true;
+    host_wait      = HOST_WAIT_NONE;
+    en_owed        = false;
+    ping_pending   = false;
+}
+
+static void host_disconnect(void) {
+    host.connected = false;
+    host.layout    = HOST_LAYOUT_UNKNOWN;
+    host_wait      = HOST_WAIT_NONE;
+    en_owed        = false;
+    ping_pending   = false;
+}
+
+void raw_hid_receive(uint8_t *data, uint8_t length) {
+    switch (data[0]) {
+        // На HOST_READY не отвечаем: хост сам отвечает на наш HOST_READY,
+        // и ответ на ответ зациклил бы обмен.
+        case HID_HOST_READY:
+            if (host.connected && ping_pending) {
+                ping_pending = false; // ответ на пинг: хост жив
+            } else {
+                host_session_start();
+            }
+            break;
+        case HID_LAYOUT_EN:
+        case HID_LAYOUT_RU:
+            host.connected = true;
+            ping_pending   = false;
+            host.layout    = data[0] == HID_LAYOUT_EN ? HOST_LAYOUT_EN : HOST_LAYOUT_RU;
+            if (host_wait == HOST_WAIT_EN && host.layout == HOST_LAYOUT_EN) {
+                en_owed   = true;
+                host_wait = HOST_WAIT_NONE;
+            } else if (host_wait == HOST_WAIT_RESTORE) {
+                host_wait = HOST_WAIT_NONE;
+            }
+            host_update_en();
+            break;
+    }
+}
+
+// Ведущая половина, из housekeeping и из ожидания внутри нажатия.
+static void host_link_task(void) {
+    if (!is_keyboard_master()) {
+        return;
+    }
+    if (host_wait != HOST_WAIT_NONE && timer_elapsed(host_wait_timer) >= HOST_EN_TIMEOUT_MS) {
+        // Хост промолчал: раскладка не изменилась, переключить не удалось или
+        // хоста больше нет. Считаем, что ничего не поменялось, и проверяем связь.
+        host_wait = HOST_WAIT_NONE;
+        host_ping();
+        host_update_en();
+    }
+    if (ping_pending && timer_elapsed(ping_timer) >= HOST_EN_TIMEOUT_MS) {
+        host_disconnect();
+    } else if (!host.connected && !ping_pending && timer_elapsed(ping_timer) >= HOST_PING_INTERVAL_MS) {
+        host_ping(); // программа жива, но мы сочли её пропавшей
+    }
+}
+
+layer_state_t layer_state_set_user(layer_state_t state) {
+    if (is_keyboard_master()) {
+        layer_wants_en = layer_state_cmp(state, LAYER_NUMBERS) || layer_state_cmp(state, LAYER_UTILITY);
+        host_update_en();
+    }
+    return state;
+}
+
+// Пакеты от хоста обычно разбирает основной цикл, но пока мы ждём внутри
+// обработки нажатия, читаем их сами.
+void raw_hid_task(void);
+
+// Пока ждём, клавиатура больше ничего не делает: не опрашивает клавиши, не
+// двигает курсор, не обновляет подсветку и вторую половину. Обычно это 1–20 мс,
+// полный таймаут — когда хост промолчал. Возможное будущее решение — не
+// блокировать, а складывать нажатия в очередь и отправлять их, когда хост ответил.
+static void wait_for_host(void) {
+    while (host_wait != HOST_WAIT_NONE) {
+        raw_hid_task();
+        host_link_task();
+    }
+}
+
+// Комбо со скобкой держит EN, пока зажато, — так же, как слой. Символ
+// печатается при нажатии, раскладка возвращается при отпускании.
+static void combo_tap_en(uint16_t keycode, keyrecord_t *record) {
+    combo_wants_en = record->event.pressed;
+    host_update_en();
+    if (record->event.pressed) {
+        wait_for_host();
+        tap_code16(keycode);
+    }
+}
+
+// ── Состояние хоста на ведомой половине ──────────────────────────────────────
+static void host_state_sync_handler(uint8_t in_len, const void *in_data, uint8_t out_len, void *out_data) {
+    if (in_len == sizeof(host)) {
+        memcpy(&host, in_data, sizeof(host));
+    }
+}
+
+// Передаём состояние ведомой половине при изменении и раз в секунду —
+// на случай, если она перезагрузилась.
+static void host_state_sync(void) {
+    static host_state_t synced = {0};
+    static uint16_t     timer  = 0;
+    if (!is_keyboard_master() || (memcmp(&synced, &host, sizeof(host)) == 0 && timer_elapsed(timer) < 1000)) {
+        return;
+    }
+    if (transaction_rpc_send(HOST_LAYOUT_SYNC, sizeof(host), &host)) {
+        synced = host;
+        timer  = timer_read();
+    }
+}
+
+// ── Caps Word ────────────────────────────────────────────────────────────────
+// Включается двумя home row Shift. В русской раскладке буквы
+// ж х ъ э б ю ё стоят на знаках препинания, их тоже набираем заглавными.
+bool caps_word_press_user(uint16_t keycode) {
+    switch (keycode) {
+        case KC_SCLN:
+        case KC_QUOT:
+        case KC_LBRC:
+        case KC_RBRC:
+        case KC_COMM:
+        case KC_DOT:
+        case KC_GRV:
+            if (host.layout != HOST_LAYOUT_RU) {
+                return false;
+            }
+            add_weak_mods(MOD_BIT(KC_LSFT));
+            return true;
+        case KC_A ... KC_Z:
+        case KC_MINS:
+            add_weak_mods(MOD_BIT(KC_LSFT));
+            return true;
+        case KC_1 ... KC_0:
+        case KC_BSPC:
+        case KC_DEL:
+        case KC_UNDS:
+            return true;
+    }
+    return false;
+}
+
+// ── Бутлоадер ────────────────────────────────────────────────────────────────
+// Зажать на BOOT_HOLD_MS клавишу большого пальца и две верхние клавиши у
+// центра той же половины. Слева — пробел (он же Utility), справа — Numbers.
+// Проверяются положения в матрице, а не слои: в прошивке Charybdis задан
+// MASTER_RIGHT, поэтому половина с USB всегда считает себя правой (ряды 5–9).
+// При кабеле в левой половине её верхние клавиши приходят на [5,4]/[5,5],
+// а пробел — на пустое место [9,4], и слой Utility не включается.
 static uint8_t  boot_keys_held = 0; // биты 0–2 — ряды 0–4, биты 3–5 — ряды 5–9
 static uint16_t boot_timer;
 
@@ -355,193 +545,143 @@ static void boot_chord_update(keyrecord_t *record) {
     }
 }
 
+// ── Трекбол: TB_TABS ─────────────────────────────────────────────────────────
+static bool tb_tabs_held = false;
 
+report_mouse_t pointing_device_task_user(report_mouse_t mouse_report) {
+    static int16_t buffer_x = 0;
+    if (!tb_tabs_held) {
+        buffer_x = 0;
+        return mouse_report;
+    }
+    buffer_x += mouse_report.x;
+    mouse_report.x = 0;
+    mouse_report.y = 0;
+    if (abs(buffer_x) > TB_TABS_THRESHOLD) {
+        tap_code16(buffer_x < 0 ? C(KC_PGUP) : C(KC_PGDN));
+        buffer_x = 0;
+    }
+    return mouse_report;
+}
 
-// ── Связь с программой land_detect на ПК (Raw HID) ───────────────────────────
-// Пакет 32 байта, код команды в data[0]. Хост сообщает текущую раскладку;
-// пока он на связи, верхняя правая клавиша левой половины горит фиолетовым
-// при английской раскладке, верхняя левая клавиша правой половины — при русской.
-// На слоях Numbers и Utility раскладка временно переключается на EN.
-enum hid_cmd {
-    HID_LAYOUT_EN       = 0x01, // host → kb
-    HID_LAYOUT_RU       = 0x02, // host → kb
-    HID_REQUEST_EN      = 0x10, // kb → host
-    HID_REQUEST_RUSSIAN = 0x11, // kb → host
-    HID_RESTORE_LAYOUT  = 0x19, // kb → host
-    HID_HOST_READY      = 0x20, // оба направления
+// ── Подсветка ────────────────────────────────────────────────────────────────
+// На базовом слое — радуга слева направо. На остальных слоях базовый эффект
+// не просвечивает: клавиша горит цветом из таблицы, C_OFF — выключена,
+// C_FX — показывает радугу базового слоя. Слои, которых нет в таблице (FN),
+// полностью тёмные.
+enum layer_colors {
+    C_OFF = 0,
+    C_FX,
+    C_PURP,
+    C_GREEN,
+    C_CYAN,
 };
 
-enum host_layout {
-    HOST_LAYOUT_NONE = 0, // хост не на связи
-    HOST_LAYOUT_UNKNOWN,  // на связи, раскладку ещё не сообщил
-    HOST_LAYOUT_EN,
-    HOST_LAYOUT_RU,
+static const rgb_t layer_palette[] = {
+    [C_OFF]   = {.r = 0,   .g = 0,   .b = 0},
+    [C_PURP]  = {.r = 221, .g = 0,   .b = 255},
+    [C_GREEN] = {.r = 33,  .g = 255, .b = 0},
+    [C_CYAN]  = {.r = 0,   .g = 255, .b = 235},
 };
 
-// На ведущей половине — из Raw HID, на ведомой — из синхронизации.
-static uint8_t host_layout = HOST_LAYOUT_NONE;
+// clang-format off
+static const uint8_t PROGMEM layer_colors[][MATRIX_ROWS][MATRIX_COLS] = {
+  [LAYER_NUMBERS] = LAYOUT(
+         C_OFF,  C_PURP,  C_PURP,   C_OFF,   C_OFF,  C_PURP,     C_PURP,   C_OFF,   C_OFF,  C_PURP,  C_PURP,   C_OFF,
+         C_OFF,  C_PURP,   C_OFF,   C_OFF,   C_OFF,  C_PURP,     C_PURP,   C_OFF,   C_OFF,   C_OFF,  C_PURP,   C_OFF,
+         C_OFF,  C_PURP,   C_OFF,   C_OFF,   C_OFF,  C_PURP,     C_PURP,   C_OFF,   C_OFF,   C_OFF,  C_PURP,   C_OFF,
+        C_PURP,  C_PURP,   C_OFF,   C_OFF,   C_OFF,  C_PURP,     C_PURP,   C_OFF,   C_OFF,   C_OFF,  C_PURP,  C_PURP,
+                                  C_PURP,  C_PURP,  C_PURP,     C_PURP,  C_PURP,
+                                           C_PURP,  C_PURP,     C_PURP
+  ),
+  [LAYER_UTILITY] = LAYOUT(
+         C_OFF, C_GREEN, C_GREEN,   C_OFF,   C_OFF, C_GREEN,    C_GREEN,   C_OFF,   C_OFF, C_GREEN, C_GREEN,   C_OFF,
+         C_OFF, C_GREEN,   C_OFF,   C_OFF,   C_OFF, C_GREEN,    C_GREEN,   C_OFF,   C_OFF,   C_OFF, C_GREEN,   C_OFF,
+         C_OFF, C_GREEN,   C_OFF,   C_OFF,   C_OFF, C_GREEN,    C_GREEN,   C_OFF,   C_OFF,   C_OFF, C_GREEN,   C_OFF,
+       C_GREEN, C_GREEN,   C_OFF,   C_OFF,   C_OFF, C_GREEN,    C_GREEN,   C_OFF,   C_OFF,   C_OFF, C_GREEN, C_GREEN,
+                                 C_GREEN, C_GREEN, C_GREEN,    C_GREEN, C_GREEN,
+                                          C_GREEN, C_GREEN,    C_GREEN
+  ),
+  [LAYER_POINTER] = LAYOUT(
+         C_OFF,  C_CYAN,  C_CYAN,   C_OFF,   C_OFF,  C_CYAN,     C_CYAN,   C_OFF,   C_OFF,  C_CYAN,  C_CYAN,   C_OFF,
+         C_OFF,  C_CYAN,   C_OFF,   C_OFF,   C_OFF,  C_CYAN,     C_CYAN,   C_OFF,   C_OFF,   C_OFF,  C_CYAN,   C_OFF,
+         C_OFF,  C_CYAN,   C_OFF,   C_OFF,   C_OFF,  C_CYAN,     C_CYAN,   C_OFF,   C_OFF,   C_OFF,  C_CYAN,   C_OFF,
+        C_CYAN,  C_CYAN,   C_OFF,   C_OFF,   C_OFF,  C_CYAN,     C_CYAN,   C_OFF,   C_OFF,   C_OFF,  C_CYAN,  C_CYAN,
+                                  C_CYAN,  C_CYAN,  C_CYAN,     C_CYAN,  C_CYAN,
+                                           C_CYAN,  C_CYAN,     C_CYAN
+  ),
+  [LAYER_GAME] = LAYOUT(
+         C_OFF,   C_OFF,   C_OFF,   C_OFF,   C_OFF,   C_OFF,      C_OFF,   C_OFF,   C_OFF,   C_OFF,   C_OFF,   C_OFF,
+         C_OFF,   C_OFF,   C_OFF,    C_FX,   C_OFF,   C_OFF,      C_OFF,   C_OFF,   C_OFF,   C_OFF,   C_OFF, C_GREEN,
+         C_OFF,   C_OFF,    C_FX,    C_FX,    C_FX,   C_OFF,      C_OFF,   C_OFF,   C_OFF,   C_OFF,   C_OFF,   C_OFF,
+         C_OFF,   C_OFF,   C_OFF,   C_OFF,   C_OFF,   C_OFF,      C_OFF,   C_OFF,   C_OFF,   C_OFF,   C_OFF,   C_OFF,
+                                    C_FX,    C_FX,    C_FX,       C_FX,    C_FX,
+                                             C_FX,    C_FX,       C_FX
+  ),
+};
+// clang-format on
 
-static bool     en_requested = false; // мы попросили EN и должны вернуть раскладку
-static bool     en_pending      = false; // ждём от хоста подтверждения EN
-static bool     restore_pending = false; // ждём от хоста раскладку после возврата
-static uint16_t host_timer;
-
-static void host_send(uint8_t cmd) {
-    uint8_t data[32] = {cmd}; // размер пакета по протоколу
-    raw_hid_send(data, sizeof(data));
+static uint8_t layer_color_at(uint8_t layer, uint8_t row, uint8_t col) {
+    return layer < ARRAY_SIZE(layer_colors) ? pgm_read_byte(&layer_colors[layer][row][col]) : C_OFF;
 }
 
-void raw_hid_receive(uint8_t *data, uint8_t length) {
-    switch (data[0]) {
-        // На HOST_READY не отвечаем: хост сам отвечает на наш HOST_READY,
-        // и ответ на ответ зациклил бы обмен.
-        case HID_HOST_READY:
-            if (host_layout == HOST_LAYOUT_NONE) {
-                host_layout = HOST_LAYOUT_UNKNOWN;
+static void set_key_color(uint8_t row, uint8_t col, uint8_t color, uint8_t led_min, uint8_t led_max) {
+    uint8_t led = g_led_config.matrix_co[row][col];
+    if (led < led_min || led >= led_max) {
+        return; // NO_LED или светодиод другой половины
+    }
+    rgb_t c = layer_palette[color];
+    rgb_matrix_set_color(led, c.r * RGB_BRIGHTNESS / 255, c.g * RGB_BRIGHTNESS / 255, c.b * RGB_BRIGHTNESS / 255);
+}
+
+static void paint_host_layout(uint8_t led_min, uint8_t led_max) {
+    if (!host.connected) {
+        return;
+    }
+    // [0,5] — верхняя правая клавиша левой половины, [5,5] — верхняя левая правой.
+    set_key_color(0, 5, host.layout == HOST_LAYOUT_EN ? C_PURP : C_OFF, led_min, led_max);
+    set_key_color(5, 5, host.layout == HOST_LAYOUT_RU ? C_PURP : C_OFF, led_min, led_max);
+}
+
+static void paint_layer(uint8_t layer, uint8_t led_min, uint8_t led_max) {
+    // Гасим всё, кроме клавиш C_FX, затем красим клавиши своими цветами.
+    bool keep_effect[RGB_MATRIX_LED_COUNT] = {false};
+    for (uint8_t row = 0; row < MATRIX_ROWS; row++) {
+        for (uint8_t col = 0; col < MATRIX_COLS; col++) {
+            uint8_t led = g_led_config.matrix_co[row][col];
+            if (led < RGB_MATRIX_LED_COUNT && layer_color_at(layer, row, col) == C_FX) {
+                keep_effect[led] = true;
             }
-            break;
-        case HID_LAYOUT_EN:
-            host_layout     = HOST_LAYOUT_EN;
-            en_pending      = false;
-            restore_pending = false;
-            break;
-        case HID_LAYOUT_RU:
-            host_layout     = HOST_LAYOUT_RU;
-            restore_pending = false;
-            break;
+        }
     }
-}
-
-// Символы на слоях Numbers и Utility и скобки из комбо рассчитаны на
-// английскую раскладку. Пока включён любой из этих слоёв или зажато такое
-// комбо, просим хост переключиться на EN, а когда не осталось ни того, ни
-// другого — вернуть прежнюю раскладку. Без связи с хостом считаем, что стоит EN.
-// Каждое нажатие придерживается, пока хост не подтвердит переключение
-// (обычно ~1 мс, бывает до ~20 мс), но не дольше HOST_EN_TIMEOUT_MS; если
-// время вышло, считаем, что хоста нет, пока он снова не пришлёт HOST_READY.
-// Подтверждения возврата тоже ждём: пока оно не пришло, host_layout ещё
-// показывает EN, и следующее комбо или слой не запросили бы EN заново.
-static bool layer_wants_en = false; // включён Numbers или Utility
-static bool combo_wants_en = false; // зажато комбо со скобкой
-
-static void host_request_en(void) {
-    host_send(HID_REQUEST_EN);
-    en_pending      = true;
-    restore_pending = false;
-    host_timer      = timer_read();
-}
-
-static void host_restore(void) {
-    host_send(HID_RESTORE_LAYOUT);
-    en_pending      = false;
-    restore_pending = true;
-    host_timer      = timer_read();
-}
-
-static void host_update_en(void) {
-    bool want_en = layer_wants_en || combo_wants_en;
-    if (want_en && !en_requested && (host_layout == HOST_LAYOUT_RU || host_layout == HOST_LAYOUT_UNKNOWN)) {
-        host_request_en();
-        en_requested = true;
-    } else if (!want_en && en_requested) {
-        host_restore();
-        en_requested = false;
+    for (uint8_t i = led_min; i < led_max; i++) {
+        if (!keep_effect[i]) {
+            rgb_matrix_set_color(i, 0, 0, 0);
+        }
     }
-}
-
-layer_state_t layer_state_set_user(layer_state_t state) {
-    if (is_keyboard_master()) {
-        layer_wants_en = layer_state_cmp(state, LAYER_NUMBERS) || layer_state_cmp(state, LAYER_UTILITY);
-        host_update_en();
-    }
-    return state;
-}
-
-// Пакеты от хоста обычно разбирает основной цикл, но пока мы ждём внутри
-// обработки нажатия, читаем их сами.
-void raw_hid_task(void);
-
-static void wait_for_host(void) {
-    while ((en_pending || restore_pending) && timer_elapsed(host_timer) < HOST_EN_TIMEOUT_MS) {
-        raw_hid_task();
-    }
-    if (en_pending || restore_pending) {
-        // Хост не ответил — считаем, что его нет: печатаем как есть, как при
-        // EN, и больше ничего не запрашиваем. Если программа на самом деле
-        // жива, она ответит на HOST_READY и связь восстановится.
-        host_layout     = HOST_LAYOUT_NONE;
-        en_requested    = false;
-        en_pending      = false;
-        restore_pending = false;
-        host_send(HID_HOST_READY);
-    }
-}
-
-// Комбо со скобкой держит EN, пока зажато, — так же, как слой. Символ
-// печатается при нажатии, раскладка возвращается при отпускании.
-static void combo_tap_en(uint16_t keycode, keyrecord_t *record) {
-    combo_wants_en = record->event.pressed;
-    host_update_en();
-    if (record->event.pressed) {
-        wait_for_host();
-        tap_code16(keycode);
-    }
-}
-
-// Caps Word (оба Shift на home row): в русской раскладке буквы
-// ж х ъ э б ю ё стоят на знаках препинания, их тоже набираем заглавными.
-bool caps_word_press_user(uint16_t keycode) {
-    switch (keycode) {
-        case KC_SCLN:
-        case KC_QUOT:
-        case KC_LBRC:
-        case KC_RBRC:
-        case KC_COMM:
-        case KC_DOT:
-        case KC_GRV:
-            if (host_layout != HOST_LAYOUT_RU) {
-                return false;
+    for (uint8_t row = 0; row < MATRIX_ROWS; row++) {
+        for (uint8_t col = 0; col < MATRIX_COLS; col++) {
+            uint8_t color = layer_color_at(layer, row, col);
+            if (color != C_OFF && color != C_FX) {
+                set_key_color(row, col, color, led_min, led_max);
             }
-            add_weak_mods(MOD_BIT(KC_LSFT));
-            return true;
-        case KC_A ... KC_Z:
-        case KC_MINS:
-            add_weak_mods(MOD_BIT(KC_LSFT));
-            return true;
-        case KC_1 ... KC_0:
-        case KC_BSPC:
-        case KC_DEL:
-        case KC_UNDS:
-            return true;
+        }
     }
+}
+
+bool rgb_matrix_indicators_advanced_user(uint8_t led_min, uint8_t led_max) {
+    uint8_t layer = get_highest_layer(layer_state | default_layer_state);
+    if (layer != LAYER_BASE) {
+        paint_layer(layer, led_min, led_max);
+    }
+    paint_host_layout(led_min, led_max);
     return false;
 }
 
-static void host_layout_sync_handler(uint8_t in_len, const void *in_data, uint8_t out_len, void *out_data) {
-    host_layout = *(const uint8_t *)in_data;
-}
-
-// Передаём состояние ведомой половине при изменении и раз в секунду —
-// на случай, если она перезагрузилась.
-static void host_layout_sync(void) {
-    static uint8_t  synced = HOST_LAYOUT_NONE;
-    static uint16_t timer  = 0;
-    if (!is_keyboard_master() || (synced == host_layout && timer_elapsed(timer) < 1000)) {
-        return;
-    }
-    if (transaction_rpc_send(HOST_LAYOUT_SYNC, sizeof(host_layout), &host_layout)) {
-        synced = host_layout;
-        timer  = timer_read();
-    }
-}
-
-void housekeeping_task_user(void) {
-    if (boot_chord_complete() && timer_elapsed(boot_timer) >= BOOT_HOLD_MS) {
-        reset_keyboard();
-    }
-    host_layout_sync();
-}
-
+// ── Обработка нажатий ────────────────────────────────────────────────────────
+// Внимание: модуль bk_pointing_device сам вызывает process_record_user, и если
+// функция вернула true — ядро QMK вызовет её ещё раз для того же события.
+// Поэтому побочные эффекты делаем только в ветках, которые возвращают false.
 bool process_record_user(uint16_t keycode, keyrecord_t *record) {
     boot_chord_update(record);
     if (record->event.pressed) {
@@ -583,14 +723,22 @@ bool process_record_user(uint16_t keycode, keyrecord_t *record) {
     return true;
 }
 
-// DPI трекбола по режимам. У bk_pointing_device DPI свой у каждого режима
-// (обычный, снайпер, драг-скролл и т.д.), а без Argos модуль сохраняет в EEPROM
-// только 1 байт флагов: после первой загрузки настройки режимов остаются
-// нулевыми, и трекбол работает на минимальном DPI. Поэтому при каждом старте
-// заново заполняем настройки режимов и выставляем нужные значения.
-// Значения — TB_*_DPI в начале файла.
+// ── Фоновые задачи и запуск ──────────────────────────────────────────────────
+void housekeeping_task_user(void) {
+    if (boot_chord_complete() && timer_elapsed(boot_timer) >= BOOT_HOLD_MS) {
+        reset_keyboard();
+    }
+    host_link_task();
+    host_state_sync();
+}
 
 void keyboard_post_init_user(void) {
+    // DPI трекбола по режимам. У bk_pointing_device DPI свой у каждого режима
+    // (обычный, снайпер, драг-скролл и т.д.), а без Argos модуль сохраняет в
+    // EEPROM только 1 байт флагов: после первой загрузки настройки режимов
+    // остаются нулевыми, и трекбол работает на минимальном DPI. Поэтому при
+    // каждом старте заново заполняем настройки режимов и выставляем нужные
+    // значения. Значения — TB_*_DPI в начале файла.
     bkpd_modes_init();
     bkpd_mode_change_dpi(MODE_SNIPING, TB_SNIPING_DPI);
     bkpd_mode_change_dpi(MODE_DRAGSCROLL, TB_DRAGSCROLL_DPI);
@@ -601,80 +749,5 @@ void keyboard_post_init_user(void) {
     rgb_matrix_sethsv_noeeprom(0, 255, RGB_BRIGHTNESS);
     rgb_matrix_set_speed_noeeprom(RGB_SPEED);
 
-    transaction_register_rpc(HOST_LAYOUT_SYNC, host_layout_sync_handler);
-    // Если программа уже запущена, она ответит HOST_READY и раскладкой.
-    host_send(HID_HOST_READY);
-}
-
-static uint8_t layer_color_at(uint8_t layer, uint8_t row, uint8_t col) {
-    return layer < ARRAY_SIZE(layer_colors) ? pgm_read_byte(&layer_colors[layer][row][col]) : C_OFF;
-}
-
-static void set_key_color(uint8_t row, uint8_t col, uint8_t color, uint8_t led_min, uint8_t led_max) {
-    uint8_t led = g_led_config.matrix_co[row][col];
-    if (led < led_min || led >= led_max) {
-        return; // NO_LED или светодиод другой половины
-    }
-    rgb_t c = layer_palette[color];
-    rgb_matrix_set_color(led, c.r * RGB_BRIGHTNESS / 255, c.g * RGB_BRIGHTNESS / 255, c.b * RGB_BRIGHTNESS / 255);
-}
-
-static void paint_host_layout(uint8_t led_min, uint8_t led_max) {
-    if (host_layout == HOST_LAYOUT_NONE) {
-        return;
-    }
-    // [0,5] — верхняя правая клавиша левой половины, [5,5] — верхняя левая правой.
-    set_key_color(0, 5, host_layout == HOST_LAYOUT_EN ? C_PURP : C_OFF, led_min, led_max);
-    set_key_color(5, 5, host_layout == HOST_LAYOUT_RU ? C_PURP : C_OFF, led_min, led_max);
-}
-
-static void paint_layer(uint8_t layer, uint8_t led_min, uint8_t led_max) {
-    // Гасим всё, кроме клавиш C_FX, затем красим клавиши своими цветами.
-    bool keep_effect[RGB_MATRIX_LED_COUNT] = {false};
-    for (uint8_t row = 0; row < MATRIX_ROWS; row++) {
-        for (uint8_t col = 0; col < MATRIX_COLS; col++) {
-            uint8_t led = g_led_config.matrix_co[row][col];
-            if (led < RGB_MATRIX_LED_COUNT && layer_color_at(layer, row, col) == C_FX) {
-                keep_effect[led] = true;
-            }
-        }
-    }
-    for (uint8_t i = led_min; i < led_max; i++) {
-        if (!keep_effect[i]) {
-            rgb_matrix_set_color(i, 0, 0, 0);
-        }
-    }
-    for (uint8_t row = 0; row < MATRIX_ROWS; row++) {
-        for (uint8_t col = 0; col < MATRIX_COLS; col++) {
-            uint8_t color = layer_color_at(layer, row, col);
-            if (color != C_OFF && color != C_FX) {
-                set_key_color(row, col, color, led_min, led_max);
-            }
-        }
-    }
-}
-
-bool rgb_matrix_indicators_advanced_user(uint8_t led_min, uint8_t led_max) {
-    uint8_t layer = get_highest_layer(layer_state | default_layer_state);
-    if (layer != LAYER_BASE) {
-        paint_layer(layer, led_min, led_max);
-    }
-    paint_host_layout(led_min, led_max);
-    return false;
-}
-
-report_mouse_t pointing_device_task_user(report_mouse_t mouse_report) {
-    static int16_t buffer_x = 0;
-    if (!tb_tabs_held) {
-        buffer_x = 0;
-        return mouse_report;
-    }
-    buffer_x += mouse_report.x;
-    mouse_report.x = 0;
-    mouse_report.y = 0;
-    if (abs(buffer_x) > TB_TABS_THRESHOLD) {
-        tap_code16(buffer_x < 0 ? C(KC_PGUP) : C(KC_PGDN));
-        buffer_x = 0;
-    }
-    return mouse_report;
+    transaction_register_rpc(HOST_LAYOUT_SYNC, host_state_sync_handler);
 }
