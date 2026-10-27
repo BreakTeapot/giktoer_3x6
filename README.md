@@ -14,5 +14,5 @@ QMK keymap for the Bastard Keyboards Charybdis (4x6), placed under `keyboards/ba
 ## Build
 
 ```sh
-qmk compile -kb bastardkb/charybdis/4x6 -km giktoer_3x6
+qmk compile -kb bastardkb/charybdis/4x6/splinktegrated_rev1 -km giktoer_3x6
 ```
